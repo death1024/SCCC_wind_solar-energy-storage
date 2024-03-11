@@ -19,8 +19,8 @@ alpha = 0.95  # 冷却系数
 # 约束条件参数
 P_B_max = 100  # 电池最大功率输出
 P_SC_max = 50  # 超级电容最大功率输出
-SOC_B_min, SOC_B_max = 0.2, 0.8  # 电池最小和最大SOC
-SOC_SC_min, SOC_SC_max = 0.1, 0.9  # 超级电容最小和最大SOC
+SOC_B_min, SOC_B_max = 0.1, 0.9  # 电池最小和最大SOC
+SOC_SC_min, SOC_SC_max = 0.05, 0.95  # 超级电容最小和最大SOC
 
 # 评价函数权重
 omega_1 = 1500
@@ -84,39 +84,75 @@ def adjust_wind_power(Pw):
     return Po
 
 
-def storage_control_and_evaluation(Pw,E_B_r,E_SC_r):
+def storage_control_and_evaluation(Pw, E_B_r, E_SC_r):
     length = len(Pw)
-    Po = adjust_wind_power(Pw)  # 输出功率初始化
-    P_HESS = np.zeros(length)  # 混合储能系统输出功率
-    SOC_B = np.zeros(length) + SOC_B_min  # 电池SOC初始化
-    SOC_SC = np.zeros(length) + SOC_SC_min  # 超级电容SOC初始化
-    P_B = np.zeros(length)  # 电池输出功率初始化
-    P_SC = np.zeros(length)  # 超级电容输出功率初始化
+    Po = adjust_wind_power(Pw)  # 调整后的输出功率
+    Phess = Pw - Po  # 储能系统需求功率
+    Ts = 15  # 采样时间，单位分钟
 
-    for t in range(1, length):
-        P_HESS[t] = Pw[t] - Po[t-1]  # 计算当前时间步的混合储能系统需求
 
-        # 电池
-        if P_HESS[t] > 0:  # 需要充电
-            P_B[t] = min(P_HESS[t], P_B_max, (SOC_B_max - SOC_B[t-1]) * E_B_r / 60)
-        elif P_HESS[t] < 0:  # 需要放电
-            P_B[t] = max(P_HESS[t], -P_B_max, (SOC_B[t-1] - SOC_B_min) * E_B_r / 60)
+    # 初始化参数
+    SOC_B = np.zeros(length)
+    SOC_SC = np.zeros(length)
+    P_B = np.zeros(length)
+    P_SC = np.zeros(length)
+    SOC_B[0] = 0.3  # 电池初始SOC
+    SOC_SC[0] = 0.3  # 超级电容初始SOC
+    eta_B = 0.8  # 电池充放电效率
+    eta_SC = 0.95  # 超级电容充放电效率
 
-        # 超级电容
-        P_HESS_remaining = P_HESS[t] - P_B[t]
-        if P_HESS_remaining > 0:
-            P_SC[t] = min(P_HESS_remaining, P_SC_max, (SOC_SC_max - SOC_SC[t-1]) * E_SC_r / 60)
-        elif P_HESS_remaining < 0:
-            P_SC[t] = max(P_HESS_remaining, -P_SC_max, (SOC_SC[t-1] - SOC_SC_min) * E_SC_r / 60)
+    for i in range(1, length):
+        # 电池充放电逻辑
+        if Phess[i] > 0:  # 需要充电
+            if SOC_B[i-1] >= SOC_B_max:  # 如果电池SOC过高，不再充电
+                P_B[i] = 0
+            else:
+                P_B[i] = min(Phess[i], P_B_max)  # 根据需求和最大充电功率确定充电功率
+        elif Phess[i] < 0:  # 需要放电
+            if SOC_B[i-1] <= SOC_B_min:  # 如果电池SOC过低，不再放电
+                P_B[i] = 0
+            else:
+                P_B[i] = max(Phess[i], -P_B_max)  # 根据需求和最大放电功率确定放电功率
+        
+        # 更新电池SOC
+        if P_B[i] > 0:  # 充电
+            SOC_B[i] = SOC_B[i-1] + (P_B[i] * eta_B * Ts / 60) / E_B_r
+        elif P_B[i] < 0:  # 放电
+            SOC_B[i] = SOC_B[i-1] + (P_B[i] / eta_B * Ts / 60) / E_B_r
+        else:
+            SOC_B[i] = SOC_B[i-1]
 
-        # SOC更新
-        SOC_B[t] = np.clip(SOC_B[t-1] + P_B[t] * 60 / E_B_r, SOC_B_min, SOC_B_max)
-        SOC_SC[t] = np.clip(SOC_SC[t-1] + P_SC[t] * 60 / E_SC_r, SOC_SC_min, SOC_SC_max)
+        SOC_B[i] = np.clip(SOC_B[i], SOC_B_min, SOC_B_max)  # 确保SOC在合理范围内
+
+       # 超级电容充放电逻辑
+        P_SC_remaining = Phess[i] - P_B[i]  # 剩余需求功率分配给超级电容
+        if P_SC_remaining > 0:
+            if SOC_SC[i-1] < SOC_SC_max:
+                P_SC[i] = min(P_SC_remaining, P_SC_max)
+            else:
+                P_SC[i] = 0  # 如果超级电容SOC过高，不再充电
+        elif P_SC_remaining < 0:
+            if SOC_SC[i-1] > SOC_SC_min:
+                P_SC[i] = max(P_SC_remaining, -P_SC_max)
+            else:
+                P_SC[i] = 0  # 如果超级电容SOC过低，不再放电
+        else:
+            P_SC[i] = 0
+
+        # 更新超级电容SOC
+        if P_SC[i] > 0:  # 充电
+            SOC_SC[i] = SOC_SC[i-1] + (P_SC[i] * eta_SC * Ts / 60) / E_SC_r
+        elif P_SC[i] < 0:  # 放电
+            SOC_SC[i] = SOC_SC[i-1] + (P_SC[i] / eta_SC * Ts / 60) / E_SC_r
+        else:
+            SOC_SC[i] = SOC_SC[i-1]
+        SOC_SC[i] = np.clip(SOC_SC[i], SOC_SC_min, SOC_SC_max)  # 确保SOC在合理范围内
 
     # 计算评价指标
-    Delta_SOC_B = abs(SOC_B[-1] - SOC_B[0]) 
-    Delta_SOC_SC = abs(SOC_SC[-1] - SOC_SC[0])  
+    Delta_SOC_B = abs(SOC_B[-1] - SOC_B[0])
+    Delta_SOC_SC = abs(SOC_SC[-1] - SOC_SC[0])
     cost = omega_1 * Delta_SOC_B + omega_2 * Delta_SOC_SC + omega_3 * E_B_r + omega_4 * E_SC_r  # 总成本
+
 
     return cost
 
@@ -193,7 +229,7 @@ def pso_with_sa(wind_power):
     return gbest_position, gbest_value
 if __name__ == "__main__":
     file_path = '附件2-场站出力.xlsx' 
-    selected_date = '2019-01-01'  
+    selected_date = '2019-01-02'  
     wind_power = load_and_plot_wind_power_data(file_path, selected_date)
 
     gbest_position, gbest_value = pso_with_sa(wind_power)
