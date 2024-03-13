@@ -17,8 +17,11 @@ T_min = 1e-10  # 最小温度
 alpha = 0.95  # 冷却系数
 
 # 约束条件参数
-P_B_max = 100  # 电池最大功率输出
-P_SC_max = 50  # 超级电容最大功率输出
+P_B_max = 10  # 电池最大功率输出，单位MW
+P_SC_max = 20  # 超级电容最大功率输出，单位MW
+
+E_BN = 100  # 电池额定容量，单位MWh
+E_SCN = 50  # 超级电容额定容量，单位MWh
 SOC_B_min, SOC_B_max = 0.1, 0.9  # 电池最小和最大SOC
 SOC_SC_min, SOC_SC_max = 0.05, 0.95  # 超级电容最小和最大SOC
 
@@ -89,64 +92,93 @@ def storage_control_and_evaluation(Pw, E_B_r, E_SC_r):
     Po = adjust_wind_power(Pw)  # 调整后的输出功率
     Phess = Pw - Po  # 储能系统需求功率
     Ts = 15  # 采样时间，单位分钟
-
+    Tmin = 60 # 最小充放电循环时间(min)
+    StateCount = 1
+    StateChangeCount = 0 # 充放电转换次数
 
     # 初始化参数
     SOC_B = np.zeros(length)
     SOC_SC = np.zeros(length)
     P_B = np.zeros(length)
     P_SC = np.zeros(length)
+    E_B = np.zeros(length)
+    E_SC = np.zeros(length)
+    C = np.zeros(length) # 电池损耗系数
     SOC_B[0] = 0.3  # 电池初始SOC
     SOC_SC[0] = 0.3  # 超级电容初始SOC
     eta_B = 0.8  # 电池充放电效率
     eta_SC = 0.95  # 超级电容充放电效率
 
-    for i in range(1, length):
-        # 电池充放电逻辑
-        if Phess[i] > 0:  # 需要充电
-            if SOC_B[i-1] >= SOC_B_max:  # 如果电池SOC过高，不再充电
-                P_B[i] = 0
-            else:
-                P_B[i] = min(Phess[i], P_B_max)  # 根据需求和最大充电功率确定充电功率
-        elif Phess[i] < 0:  # 需要放电
-            if SOC_B[i-1] <= SOC_B_min:  # 如果电池SOC过低，不再放电
-                P_B[i] = 0
-            else:
-                P_B[i] = max(Phess[i], -P_B_max)  # 根据需求和最大放电功率确定放电功率
-        
-        # 更新电池SOC
-        if P_B[i] > 0:  # 充电
-            SOC_B[i] = SOC_B[i-1] + (P_B[i] * eta_B * Ts / 60) / E_B_r
-        elif P_B[i] < 0:  # 放电
-            SOC_B[i] = SOC_B[i-1] + (P_B[i] / eta_B * Ts / 60) / E_B_r
-        else:
+    if (Phess[0]<0):
+        C[0] = SOC_B_max/(SOC_B[0]^2)
+    else:
+        C[0] = SOC_B[0]/(SOC_B[0]*SOC_B_max)
+
+    E_B[0] = E_BN * SOC_B[0]
+    E_SC[0] = E_SCN * SOC_SC[0]
+
+    for i in range(1, len(Phess)):
+        if Phess[i] > 0 and SOC_B[i-1] >= SOC_B_max:
+            # Po<Pw,需要充电,但是SOC过高
+            P_B[i] = 0  # 不吸收功率
             SOC_B[i] = SOC_B[i-1]
-
-        SOC_B[i] = np.clip(SOC_B[i], SOC_B_min, SOC_B_max)  # 确保SOC在合理范围内
-
-       # 超级电容充放电逻辑
-        P_SC_remaining = Phess[i] - P_B[i]  # 剩余需求功率分配给超级电容
-        if P_SC_remaining > 0:
-            if SOC_SC[i-1] < SOC_SC_max:
-                P_SC[i] = min(P_SC_remaining, P_SC_max)
-            else:
-                P_SC[i] = 0  # 如果超级电容SOC过高，不再充电
-        elif P_SC_remaining < 0:
-            if SOC_SC[i-1] > SOC_SC_min:
-                P_SC[i] = max(P_SC_remaining, -P_SC_max)
-            else:
-                P_SC[i] = 0  # 如果超级电容SOC过低，不再放电
+        elif Phess[i] < 0 and SOC_B[i-1] <= SOC_B_min:
+            # Po>Pw,需要放电,但是SOC过低
+            P_B[i] = 0  # 不释放功率
+            SOC_B[i] = SOC_B[i-1]
         else:
-            P_SC[i] = 0
+            # 确定参考滤波系数，低频功率
+            a = min((2 * np.pi * 15 / (2 * np.pi * 15 + Tmin)) / (2 * C[i-1]), 1/15)
+            P_B[i] = min((1-a) * P_B[i-1] + a * Phess[i], P_B_max)
+            # 检查充放电间隔
+            if StateCount < 2 and np.sign(P_B[i]) != np.sign(P_B[i-1]):
+                P_B[i] = P_B[i-1]  # 如果时间过短，不能变功率
 
-        # 更新超级电容SOC
+            # 更新荷电状态
+            if P_B[i] > 0:  # 充电
+                SOC_B[i] = SOC_B[i-1] + (eta_B * P_B[i] * Ts / 60) / E_B_r
+            elif P_B[i] < 0:  # 放电
+                SOC_B[i] = SOC_B[i-1] + ((1 / eta_B) * P_B[i] * Ts / 60) / E_B_r
+            else:
+                SOC_B[i] = SOC_B[i-1]
+
+            # 检查荷电状态并修正功率
+            if SOC_B[i] > SOC_B_max:
+                P_B[i] = (SOC_B_max - SOC_B[i-1]) * E_B_r / eta_B
+                SOC_B[i] = SOC_B_max
+            elif SOC_B[i] < SOC_B_min:
+                P_B[i] = (SOC_B[i-1] - SOC_B_min) * E_B_r * eta_B
+                SOC_B[i] = SOC_B_min
+
+    # 更新充放电间隔
+        if P_B[i] * P_B[i-1] > 0 or (P_B[i] == 0 and P_B[i-1] == 0):
+            StateCount += 1
+        else:
+            StateChangeCount += 1
+            StateCount = 0
+
+        # 超级电容
+        P_SC[i] = min(Phess[i] - P_B[i], P_SC_max)
         if P_SC[i] > 0:  # 充电
-            SOC_SC[i] = SOC_SC[i-1] + (P_SC[i] * eta_SC * Ts / 60) / E_SC_r
+            SOC_SC[i] = SOC_SC[i-1] + (eta_SC * P_SC[i] * Ts / 60) / E_SC_r
         elif P_SC[i] < 0:  # 放电
-            SOC_SC[i] = SOC_SC[i-1] + (P_SC[i] / eta_SC * Ts / 60) / E_SC_r
+            SOC_SC[i] = SOC_SC[i-1] + ((1 / eta_SC) * P_SC[i] * Ts / 60) / E_SC_r
         else:
             SOC_SC[i] = SOC_SC[i-1]
-        SOC_SC[i] = np.clip(SOC_SC[i], SOC_SC_min, SOC_SC_max)  # 确保SOC在合理范围内
+
+    # 超级电容状态检验
+        if SOC_SC[i] > SOC_SC_max:
+            P_SC[i] = (SOC_SC_max - SOC_SC[i-1]) * E_SC_r / eta_SC
+            SOC_SC[i] = SOC_SC_max
+        elif SOC_SC[i] < SOC_SC_min:
+            P_SC[i] = (SOC_SC[i-1] - SOC_SC_min) * E_SC_r * eta_SC
+            SOC_SC[i] = SOC_SC_min
+
+    # 更新损耗系数
+        if P_B[i] > 0:
+            C[i] = SOC_B_max / (SOC_B[i] * SOC_B[i-1])
+        else:
+            C[i] = SOC_B[i-1] / (SOC_B_max * SOC_B[i])
 
     # 计算评价指标
     Delta_SOC_B = abs(SOC_B[-1] - SOC_B[0])
@@ -159,7 +191,7 @@ def storage_control_and_evaluation(Pw, E_B_r, E_SC_r):
 
 class Particle:
     def __init__(self):
-        self.position = np.array([random.uniform(0, P_B_max), random.uniform(0, P_SC_max)])
+        self.position = np.array([random.uniform(0, E_BN), random.uniform(0, E_SCN)])
         self.velocity = np.array([0, 0])
         self.pbest_position = self.position.copy()
         self.pbest_value = float('inf')
@@ -175,7 +207,7 @@ class Particle:
         r1, r2 = np.random.rand(2)
         self.velocity = w * self.velocity + c1 * r1 * (self.pbest_position - self.position) + c2 * r2 * (gbest_position - self.position)
         self.position += self.velocity
-        self.position = np.clip(self.position, [0, 0], [P_B_max, P_SC_max])
+        self.position = np.clip(self.position, [0, 0], [E_BN,  E_SCN])
 
 
 
@@ -183,7 +215,7 @@ def simulated_annealing(particle, T, wind_power):
     # 随机生成新位置
     new_position = particle.position + np.random.uniform(-1, 1, particle.position.shape) * T
     # 确保新位置在约束范围内
-    new_position = np.clip(new_position, [0, 0], [P_B_max, P_SC_max])
+    new_position = np.clip(new_position, [0, 0], [E_BN, E_SCN])
     
     # 计算新位置的成本
     new_cost = storage_control_and_evaluation(wind_power,new_position[0],new_position[1])
