@@ -58,7 +58,8 @@ def load_and_plot_wind_power_data(file_path, selected_date):
     return selected_day_data['实际功率(kW)'].values
 
 def adjust_wind_power(Pw):
-    Po = np.zeros_like(Pw)
+    length = len(Pw)
+    Po = np.zeros(length)
     Po[0:4] = Pw[0:4]
     dP_15 = 0.03
     dP_60 = 0.10
@@ -66,9 +67,9 @@ def adjust_wind_power(Pw):
     
     for i in range(4, len(Pw)):
         if Pw[i] > Po[i-1]:
-            Poi = max(Pw[i-4:i+1]) - dP_15 * Pw[i]
+            Poi = max(Pw[i-4:i]) - dP_15 * Pw[i]
         elif Pw[i] < Po[i-1]:
-            Poi = min(Pw[i-4:i+1]) + dP_15 * Pw[i]
+            Poi = min(Pw[i-4:i]) + dP_15 * Pw[i]
         else:
             Poi = Pw[i]
         
@@ -261,7 +262,7 @@ def pso_with_sa(wind_power):
     return gbest_position, gbest_value
 if __name__ == "__main__":
     file_path = '附件2-场站出力.xlsx' 
-    selected_date = '2019-01-02'  
+    selected_date = '2019-12-01'  
     wind_power = load_and_plot_wind_power_data(file_path, selected_date)
 
     gbest_position, gbest_value = pso_with_sa(wind_power)
