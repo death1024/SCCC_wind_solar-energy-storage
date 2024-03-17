@@ -43,10 +43,9 @@ def load_and_plot_wind_power_data(file_path, selected_date):
     
     # 实际功率(kW)
     selected_day_data = selected_day_data.copy()
-    selected_day_data['实际功率(kW)'] = selected_day_data['实际功率(MW)'] * 1000
     
     plt.figure(figsize=(12, 6))
-    plt.plot(selected_day_data['时间'], selected_day_data['实际功率(kW)'], label='Wind Power', marker='o', linestyle='-')
+    plt.plot(selected_day_data['时间'], selected_day_data['实际功率(MW)'], label='Wind Power', marker='o', linestyle='-')
     plt.xlabel('Time')
     plt.ylabel('Power (kW)')
     plt.title(f'Wind Power on {selected_date}')
@@ -55,7 +54,7 @@ def load_and_plot_wind_power_data(file_path, selected_date):
     plt.legend()
     plt.show()
     
-    return selected_day_data['实际功率(kW)'].values
+    return selected_day_data['实际功率(MW)'].values
 
 def adjust_wind_power(Pw):
     length = len(Pw)
@@ -191,6 +190,7 @@ def storage_control_and_evaluation(Pw, E_B_r, E_SC_r):
 
 
 class Particle:
+    global gbest_position, gbest_value
     def __init__(self):
         self.position = np.array([random.uniform(0, E_BN), random.uniform(0, E_SCN)])
         self.velocity = np.array([0, 0])
@@ -262,7 +262,7 @@ def pso_with_sa(wind_power):
     return gbest_position, gbest_value
 if __name__ == "__main__":
     file_path = '附件2-场站出力.xlsx' 
-    selected_date = '2019-12-01'  
+    selected_date = '2019-12-02'  
     wind_power = load_and_plot_wind_power_data(file_path, selected_date)
 
     gbest_position, gbest_value = pso_with_sa(wind_power)
